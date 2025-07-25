@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CitySense FCM Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
+        button { padding: 10px 15px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; margin-right: 10px; }
+        button:hover { background-color: #45a049; }
+        input[type="text"] { padding: 8px; width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+        textarea { width: 100%; height: 100px; box-sizing: border-box; margin-bottom: 10px; }
+        .log-area { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; margin-top: 20px; min-height: 150px; overflow-y: scroll; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CitySense FCM Test Page</h1>
+        <p>This page will register for FCM and display incoming notifications.</p>
+
+        <p><strong>Your User ID:</strong> <input type="text" id="userIdInput" placeholder="Enter your Firebase User ID"></p>
+        <p>
+            <button id="requestPermissionBtn">1. Request Notification Permission</button>
+            <button id="getTokenBtn">2. Get & Save FCM Token</button>
+        </p>
+        <p><strong>Your FCM Token:</strong> <textarea id="fcmTokenDisplay" readonly></textarea></p>
+        <hr>
+
+        <h2>Test Alert Trigger (Manual)</h2>
+        <p>This section simulates Aniket's agent creating an alert.</p>
+        <p><strong>Geohash:</strong> <input type="text" id="alertGeohash" value="tdr0f"></p>
+        <p><strong>Alert Type:</strong>
+            <select id="alertType">
+                <option value="traffic">traffic</option>
+                <option value="weather">weather</option>
+                <option value="emergency">emergency</option>
+            </select>
+        </p>
+        <p><strong>Description:</strong> <input type="text" id="alertDescription" value="Test Alert: Heavy traffic"></p>
+        <p><strong>Severity:</strong> <input type="text" id="alertSeverity" value="high"></p>
+        <p><button id="triggerAlertBtn">3. Create Test Alert in Firestore</button></p>
+
+        <h2>Logs</h2>
+        <pre id="logArea" class="log-area"></pre>
+    </div>
+
+    <!-- Load environment configuration first -->
+    <script src="env-loader.js"></script>
+    <script src="firebase-config.js"></script>
+    
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
+
+    <script>
+        // Firebase config is now loaded from firebase-config.js
+        const firebaseConfig = window.firebaseConfig;
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const messaging = firebase.messaging();
+
+        const userIdInput = document.getElementById('userIdInput');
+        const requestPermissionBtn = document.getElementById('requestPermissionBtn');
+        const getTokenBtn = document.getElementById('getTokenBtn');
+        const fcmTokenDisplay = document.getElementById('fcmTokenDisplay');
+        const triggerAlertBtn = document.getElementById('triggerAlertBtn');
+        const alertGeohash = document.getElementById('alertGeohash');
+        const alertType = document.getElementById('alertType');
+        const alertDescription = document.getElementById('alertDescription');
+        const alertSeverity = document.getElementById('alertSeverity');
+        const logArea = document.getElementById('logArea');
+
+        function log(message) {
+            logArea.textContent += message + '\n';
+            logArea.scrollTop = logArea.scrollHeight; // Auto-scroll
+        }
+
+        // --- FCM Setup ---
+        requestPermissionBtn.addEventListener('click', async () => {
+            log('Requesting notification permission...');
+            try {
+                const permission = await Notification.requestPermission();
+                if (permission === 'granted') {
+                    log('Notification permission granted.');
+                } else {
+                    log('Notification permission denied. Cannot receive push notifications.');
+                }
+            } catch (error) {
+                log('Error requesting permission: ' + error);
+            }
+        });
+
+        getTokenBtn.addEventListener('click', async () => {
+            const userId = userIdInput.value.trim();
+            if (!userId) {
+                log('Please enter a User ID first.');
+                return;
+            }
+            if (Notification.permission !== 'granted') {
+                log('Notification permission not granted. Please click "Request Notification Permission" first.');
+                return;
+            }
+
+            log('Getting FCM token...');
+            try {
+                // Ensure the service worker is registered first
+                await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+                // Using VAPID key from configuration
+                const token = await messaging.getToken({ vapidKey: window.vapidKey });
+                fcmTokenDisplay.value = token;
+                log('FCM Token: ' + token);
+
+                // Save token to Firestore for the user
+                log(`Saving token for user ${userId}...`);
+                await db.collection('users').doc(userId).set({
+                    fcmTokens: {
+                        [token]: true // Store as a map for easy management
+                    }
+                }, { merge: true }); // Use merge to avoid overwriting existing user data
+                log('FCM token saved to Firestore successfully.');
+
+                // Listen for foreground messages (optional, background messages are handled by SW)
+                messaging.onMessage((payload) => {
+                    log('[index.html] Received foreground message: ' + JSON.stringify(payload));
+                    // You might want to display a temporary toast or update UI for foreground messages
+                });
+
+            } catch (error) {
+                log('Error getting/saving FCM token: ' + error);
+            }
+        });
+
+        // --- Manual Alert Trigger ---
+        triggerAlertBtn.addEventListener('click', async () => {
+            const userId = userIdInput.value.trim();
+            if (!userId) {
+                log('Please enter your User ID.');
+                return;
+            }
+
+            log('Creating test alert in Firestore...');
+            try {
+                await db.collection('alerts').add({
+                    geohash: alertGeohash.value,
+                    type: alertType.value,
+                    description: alertDescription.value,
+                    severity: alertSeverity.value,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(), // Use server timestamp
+                    agent: "Manual Test (Temporary)"
+                });
+                log('Test alert created in Firestore. Check Cloud Functions logs for FCM trigger.');
+            } catch (error) {
+                log('Error creating test alert: ' + error);
+            }
+        });
+
+    </script>
+</body>
+</html>
